@@ -1,9 +1,9 @@
-import smtplib
 import os
 import threading
 import base64
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import requests
 from flask import Flask, request
 from datetime import datetime
 from dotenv import load_dotenv
@@ -17,17 +17,33 @@ SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD") # Gmail App Password
 NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL")   # where to send alerts (can be same as SMTP_EMAIL)
 
 
-def send_notification(ip, path, user_agent, time):
+def get_location_info(ip):
+    """Retrieve City, Region, and Country from a free IP API."""
+    try:
+        response = requests.get(f"http://ip-api.com/json/{ip}", timeout=5)
+        data = response.json()
+        if data.get("status") == "success":
+            return f"{data.get('city')}, {data.get('regionName')}, {data.get('country')}"
+    except Exception:
+        pass
+    return "Unknown Location"
+
+
+def send_notification(ip, path, user_agent, time, res="N/A", ref="Unknown", tz="UTC"):
     """Send an email notification about a new visitor."""
-    subject = f"👁️ New Visitor on Your Website"
+    location = get_location_info(ip)
+    subject = f"👁️ New Visitor from {location}"
 
     body = f"""
     <h2>Someone just visited your website!</h2>
     <table border="0" cellpadding="10" cellspacing="0" style="font-family: sans-serif; border-collapse: collapse;">
-        <tr style="background: #f8fafc;"><td style="font-weight: bold; color: #6366f1;">Time:</td><td>{time}</td></tr>
+        <tr style="background: #f8fafc;"><td style="font-weight: bold; color: #6366f1;">Time:</td><td>{time} ({tz})</td></tr>
         <tr><td style="font-weight: bold; color: #6366f1;">IP Address:</td><td><code>{ip}</code></td></tr>
         <tr style="background: #f8fafc;"><td style="font-weight: bold; color: #6366f1;">Page Visited:</td><td><code>{path}</code></td></tr>
-        <tr><td style="font-weight: bold; color: #6366f1;">Device:</td><td style="font-size: 12px; color: #64748b;">{user_agent}</td></tr>
+        <tr><td style="font-weight: bold; color: #6366f1;">Location:</td><td style="color: #0f172a; font-weight: 600;">{location}</td></tr>
+        <tr style="background: #f8fafc;"><td style="font-weight: bold; color: #6366f1;">Screen Size:</td><td>{res}</td></tr>
+        <tr><td style="font-weight: bold; color: #6366f1;">Referring Page:</td><td><small>{ref}</small></td></tr>
+        <tr style="background: #f8fafc;"><td style="font-weight: bold; color: #6366f1;">Device:</td><td style="font-size: 11px; color: #64748b;">{user_agent}</td></tr>
     </table>
     <p style="margin-top: 20px; color: #94a3b8; font-size: 12px;">Sent by Visitor Notify</p>
     """
@@ -47,9 +63,9 @@ def send_notification(ip, path, user_agent, time):
         print(f"[✗] Failed to send email: {e}")
 
 
-def send_notification_async(ip, path, user_agent, time):
+def send_notification_async(ip, path, user_agent, time, res, ref, tz):
     """Run send_notification in a background thread so the user doesn't wait."""
-    thread = threading.Thread(target=send_notification, args=(ip, path, user_agent, time))
+    thread = threading.Thread(target=send_notification, args=(ip, path, user_agent, time, res, ref, tz))
     thread.start()
 
 
@@ -60,12 +76,26 @@ def notify_on_visit():
     if request.path == "/favicon.ico" or request.path.startswith("/internal") or request.path.startswith("/static"):
         return
 
-    ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+    # Robust IP extraction for Render/Cloud environments
+    ip = request.headers.get("X-Forwarded-For")
+    if not ip:
+        ip = request.headers.get("X-Real-IP")
+    if not ip:
+        ip = request.remote_addr
+        
+    # If it's a list (common with proxies), take the first one (real visitor)
+    if ip and "," in ip:
+        ip = ip.split(",")[0].strip()
     path = request.path
     user_agent = request.headers.get("User-Agent", "Unknown")
     time = datetime.utcnow().strftime("%H:%M:%S UTC on %d %b %Y")
 
-    send_notification_async(ip, path, user_agent, time)
+    # Extract Smart Data from JavaScript (if available)
+    res = request.args.get("res", "Unknown")
+    ref = request.args.get("ref", "Direct Visit")
+    tz = request.args.get("tz", "UTC")
+
+    send_notification_async(ip, path, user_agent, time, res, ref, tz)
 
 
 @app.route("/")
@@ -166,3 +196,4 @@ def tracking_pixel():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5001))
     app.run(host="0.0.0.0", port=port)
+
